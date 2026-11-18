@@ -23,6 +23,7 @@ import {achievementView,claimAchievement} from '../Utils/syndicateAchievements.j
 import {walletId as achWalletId,ensureSharedWallet as achEnsureWallet} from '../Utils/syndicateShopWallet.js';
 import {withAccountLock as achAccountLock} from '../Utils/syndicateAccountLock.js';
 import {fileURLToPath} from 'node:url';
+import {adminAddXp,ADMIN_SEASONS,ADMIN_MAX_XP} from '../Utils/syndicateProgression.js';
 
 const router = express.Router();
 const sessions = new Map();
@@ -378,6 +379,46 @@ router.post('/launcher/level',safe(async(req,res)=>{
  let xpToNext=0;
  try{const table=JSON.parse(readFileSync(new URL('../local/Battlepass/Data/Season'+season+'/SeasonXP.json',import.meta.url)));xpToNext=Math.max(0,Math.floor(Number(table.find(r=>r.Level===level)?.XpToNextLevel)||0));}catch{}
  res.json({season,level,xp,xpToNext,tier:Math.max(0,Math.floor(Number(a.book_level)||0))});
+}));
+// Launcher admin panel (progress): level, XP and Battle Pass tier of every season for the signed-in player, and
+// "add XP" for one chosen season. Like every /launcher route this is reachable from this PC only and needs the
+// launcher's session token.
+const adminXpTables=new Map();
+const adminXpTable=season=>{
+ if(!adminXpTables.has(season)){
+  try{adminXpTables.set(season,JSON.parse(readFileSync(new URL('../local/Battlepass/Data/Season'+season+'/SeasonXP.json',import.meta.url))));}
+  catch{adminXpTables.set(season,[]);}
+ }
+ return adminXpTables.get(season);
+};
+const adminSeasonView=(a,season,active)=>{
+ const src=season===active?a:(a.tilted_season_states?.[String(season)]?.attributes||{});
+ const level=Math.max(1,Math.min(100,Math.floor(Number(src.level)||1)));
+ const xp=Math.max(0,Math.floor(Number(src.xp)||0));
+ const xpToNext=Math.max(0,Math.floor(Number(adminXpTable(season).find(r=>r.Level===level)?.XpToNextLevel)||0));
+ return {season,active:season===active,level,xp,xpToNext,tier:Math.max(0,Math.floor(Number(src.book_level)||0))};
+};
+router.post('/launcher/admin/progress',safe(async(req,res)=>{
+ const entry=sessions.get((req.headers.authorization||'').replace(/^Bearer /,''));
+ if(!entry || entry.expires<=Date.now())return res.status(401).json({message:'Please sign in again.'});
+ const doc=await Profile.collection.findOne({accountId:entry.accountId},{projection:{'profiles.athena.stats.attributes':1}});
+ const a=doc?.profiles?.athena?.stats?.attributes||{};
+ const active=ADMIN_SEASONS.includes(Number(a.tilted_active_season))?Number(a.tilted_active_season):4;
+ res.json({active,maxXp:ADMIN_MAX_XP,seasons:ADMIN_SEASONS.map(season=>adminSeasonView(a,season,active))});
+}));
+router.post('/launcher/admin/xp',safe(async(req,res)=>{
+ const entry=sessions.get((req.headers.authorization||'').replace(/^Bearer /,''));
+ if(!entry || entry.expires<=Date.now())return res.status(401).json({message:'Please sign in again.'});
+ const season=Number(req.body?.season),amount=Number(req.body?.amount);
+ if(!ADMIN_SEASONS.includes(season))return res.status(400).json({message:'Choose a season between 2 and 12.'});
+ if(!Number.isSafeInteger(amount)||amount<1||amount>ADMIN_MAX_XP)return res.status(400).json({message:'Enter a whole XP amount from 1 to '+ADMIN_MAX_XP.toLocaleString('en-US')+'.'});
+ if(travelActive(entry.accountId))return res.status(409).json({message:'Quit your friend\'s match to sync your account first.'});
+ try{
+  const result=await achAccountLock(entry.accountId,()=>adminAddXp(entry.accountId,season,amount));
+  res.json({...result,added:amount});
+ }catch(error){
+  res.status(409).json({message:error?.message||'Could not add XP. Try again in a moment.'});
+ }
 }));
 // Syndicate: "Unlock all cosmetics" toggle. On: every cosmetic exported from the player's Fortnite
 // builds is added (marked). Off: only the marked ones are removed; owned cosmetics stay.

@@ -70,6 +70,27 @@ export async function awardAccount(accountId,event=null) {
   }
   throw new Error('Profile busy; event retained for retry');
 }
+// Launcher admin panel: gives XP to one season of the account, whichever season is active. The season is switched
+// to for the calculation and back afterwards, exactly like a match event does, so the level, Battle Pass tier and
+// tier rewards follow the normal season tables. Returns the new state of that season.
+export const ADMIN_SEASONS=Object.freeze([2,3,4,5,6,7,8,9,10,11,12]);
+export const ADMIN_MAX_XP=10000000;
+export async function adminAddXp(accountId,season,amount) {
+  if(!ADMIN_SEASONS.includes(season))throw new Error('Unsupported season');
+  if(!Number.isSafeInteger(amount)||amount<1||amount>ADMIN_MAX_XP)throw new Error('Invalid XP amount');
+  if(travelActive(accountId))throw new Error('Account is hosted remotely');
+  for(let attempt=0;attempt<8;attempt++){
+    const doc=await Profile.collection.findOne({accountId});if(!doc?.profiles?.athena||!doc.profiles.common_core)throw new Error('Missing progression profile');
+    const old=doc.profiles.athena.rvn,common=doc.profiles.common_core.rvn;
+    const originalSeason=activeSeason(doc.profiles.athena);
+    activateSeason(doc.profiles.athena,season);
+    const result=applyProgression(doc.profiles,amount);
+    if(originalSeason!==season)activateSeason(doc.profiles.athena,originalSeason);
+    const saved=await Profile.collection.updateOne({accountId,'profiles.athena.rvn':old,'profiles.common_core.rvn':common},{$set:{'profiles.athena':doc.profiles.athena,'profiles.common_core':doc.profiles.common_core}});
+    if(saved.modifiedCount){if(global.giftReceived)global.giftReceived[accountId]=true;return {season,...result};}
+  }
+  throw new Error('Profile busy; try again');
+}
 let busy=false;
 export async function consumeProgression(){
   if(busy)return;busy=true;
